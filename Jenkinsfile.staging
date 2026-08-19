@@ -88,6 +88,15 @@ for attempt in $(seq 1 12); do
   [[ "${attempt}" == "12" ]] && exit 1
   sleep 5
 done
+for attempt in $(seq 1 12); do
+  collector_health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${COLLECTOR_CONTAINER_NAME}" 2>/dev/null || true)
+  [[ "${collector_health}" == "healthy" ]] && break
+  [[ "${attempt}" == "12" ]] && {
+    docker logs --tail 100 "${COLLECTOR_CONTAINER_NAME}" || true
+    exit 1
+  }
+  sleep 5
+done
 docker exec "${CONTAINER_NAME}" node -e "fetch('http://127.0.0.1:8080/health').then(async r => { const body = await r.json(); if (!r.ok || body.dataSource !== 'production' || body.counts.sources !== 4 || body.counts.articles < 1) process.exit(1) })"
 IMAGE_ID="$(cat .catalog-image-id)"
 RUNNING_IMAGE_ID="$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}")"
