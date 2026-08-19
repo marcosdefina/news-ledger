@@ -5,6 +5,7 @@ services:
     image: ${IMAGE_REF:?IMAGE_REF must be the staged immutable image ID}
     container_name: news-ledger-staging
     restart: unless-stopped
+    network_mode: bridge
     environment:
       NODE_ENV: staging
       PORT: "8080"
@@ -26,6 +27,7 @@ services:
     image: ${IMAGE_REF:?IMAGE_REF must be the staged immutable image ID}
     container_name: news-ledger-collector
     restart: unless-stopped
+    network_mode: bridge
     command: ["node", "src/cli.mjs", "loop"]
     environment:
       NODE_ENV: production
