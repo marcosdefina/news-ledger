@@ -1,0 +1,11 @@
+schema: stillwaters.dns-records.v1
+authority: provider-unconfigured
+records:
+  - environment: staging
+    hostname: staging.news.stillwaters.cz
+    type: CNAME
+    value: gateway.stillwaters.cz
+  - environment: production
+    hostname: news.stillwaters.cz
+    type: CNAME
+    value: gateway.stillwaters.cz

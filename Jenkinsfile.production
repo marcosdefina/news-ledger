@@ -1,0 +1,281 @@
+pipeline {
+  agent { label 'mainframe' }
+    options {
+        ansiColor('xterm')
+        timestamps()
+      skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    parameters {
+        text(name: 'STAGING_RECEIPT_B64', defaultValue: '', description: 'Base64 of the archived signed staging-receipt.json.')
+    }
+    environment {
+        STAGING_CONTAINER_NAME = 'news-ledger-staging'
+        CONTAINER_NAME = 'news-ledger-production'
+      JENKINS_CONTROLLER_CONTAINER = 'jenkins'
+      COMPOSE_HELPER_IMAGE = 'docker:28.5.1-cli@sha256:a35dae37a79d2b84ccf0100045aec5ab920e4cc8e84f9141d355da602f8af899'
+    }
+    stages {
+        stage('Checkout Clean Candidate') {
+            steps {
+                deleteDir()
+                checkout scm
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+git reset --hard HEAD
+git clean -ffdx
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+  echo 'Production workspace is not pristine.' >&2
+  exit 1
+}
+'''
+            }
+        }
+      stage('Initialize Promotion State') {
+        steps {
+          sh '''#!/usr/bin/env bash
+set -euo pipefail
+marker=".catalog-promotion-${BUILD_TAG}"
+previous_image=".previous-production-image-${BUILD_TAG}"
+previous_config=".previous-production-compose-${BUILD_TAG}.yaml"
+candidate_config=".candidate-production-compose-${BUILD_TAG}.yaml"
+state_dir="${JENKINS_HOME}/catalog-deployments/news-ledger/production"
+rm -f "${marker}" "${previous_image}" "${previous_config}" "${candidate_config}"
+mkdir -p "${state_dir}"
+chmod 700 "${state_dir}"
+if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+  docker inspect --format='{{.Image}}' "${CONTAINER_NAME}" > "${previous_image}"
+  [[ -s "${state_dir}/last-known-good.yaml" ]] || {
+    echo 'Running production has no last-known-good Compose bundle.' >&2
+    exit 1
+  }
+  cp "${state_dir}/last-known-good.yaml" "${previous_config}"
+  [[ "$(bash ops/jenkins/compose.sh -f "${previous_config}" config --images | sed -n '1p')" == "$(cat "${previous_image}")" ]] || {
+    echo 'Last-known-good Compose bundle does not match the running image.' >&2
+    exit 1
+  }
+fi
+'''
+        }
+      }
+        stage('Validate Promotion Gate') {
+            steps {
+            withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
+              sh '''#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${STAGING_RECEIPT_B64}" ]] || { echo 'STAGING_RECEIPT_B64 is required.' >&2; exit 1; }
+printf '%s' "${STAGING_RECEIPT_B64}" | base64 -d > .staging-receipt.json
+python3 - <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import re
+
+with open(".staging-receipt.json", encoding="utf-8") as source:
+    receipt = json.load(source)
+signature = receipt.pop("signature", "")
+message = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+expected = hmac.new(
+    os.environ["RECEIPT_HMAC_KEY"].encode(), message, hashlib.sha256
+).hexdigest()
+if not hmac.compare_digest(signature, expected):
+    raise SystemExit("staging receipt signature is invalid")
+expected_fields = {
+    "schema": "stillwaters.staging-receipt.v2",
+    "service": "news-ledger",
+    "manifestDigest": "38a0394f29350efac872bf8868ea7c6bae5d8d3adf5af0cf1b601c16cabe49e8",
+    "branch": "staging",
+    "stagingUrl": "https://staging.news.stillwaters.cz",
+    "healthPath": "/health",
+}
+for field, value in expected_fields.items():
+    if receipt.get(field) != value:
+        raise SystemExit(f"staging receipt {field} does not match this production candidate")
+if not re.fullmatch(r"[a-f0-9]{7,64}", receipt.get("commit", "")):
+    raise SystemExit("staging receipt commit is invalid")
+if not re.fullmatch(r"[a-f0-9]{40,64}", receipt.get("tree", "")):
+  raise SystemExit("staging receipt tree is invalid")
+if not re.fullmatch(r"sha256:[a-f0-9]{64}", receipt.get("imageId", "")):
+    raise SystemExit("staging receipt image ID is invalid")
+if not re.fullmatch(
+    r"https://jenkins\.stillwaters\.cz/job/news-ledger-staging/[0-9]+/",
+    receipt.get("buildUrl", ""),
+):
+    raise SystemExit("staging receipt build URL is invalid")
+for filename, field in (
+    (".catalog-image-id", "imageId"),
+    (".catalog-staged-commit", "commit"),
+    (".catalog-staged-tree", "tree"),
+    (".catalog-staging-build-url", "buildUrl"),
+):
+    with open(filename, "w", encoding="utf-8") as target:
+        target.write(receipt[field] + "\n")
+PY
+IMAGE_ID="$(cat .catalog-image-id)"
+STAGED_COMMIT="$(cat .catalog-staged-commit)"
+STAGED_TREE="$(cat .catalog-staged-tree)"
+docker image inspect "${IMAGE_ID}" >/dev/null
+[[ "$(docker inspect --format='{{.Image}}' "${STAGING_CONTAINER_NAME}")" == "${IMAGE_ID}" ]] || {
+  echo 'The staging container no longer runs the signed image.' >&2
+  exit 1
+}
+[[ "$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${STAGING_CONTAINER_NAME}")" == "healthy" ]] || {
+  echo 'The staging container is not healthy.' >&2
+  exit 1
+}
+git cat-file -e "${STAGED_COMMIT}^{commit}"
+[[ "$(git rev-parse 'HEAD^{tree}')" == "${STAGED_TREE}" ]] || {
+  echo 'Production tree is not byte-identical to the staged tree.' >&2
+  exit 1
+}
+curl --fail --silent --show-error --retry 3 \
+  --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
+  "https://staging.news.stillwaters.cz/health" >/dev/null
+'''
+            }
+          }
+        }
+        stage('Fresh Production Approval') {
+          steps {
+            script {
+              def imageId = readFile('.catalog-image-id').trim()
+              def approval = input(
+                message: "Promote signed image ${imageId} to news.stillwaters.cz?",
+                ok: 'Promote exact staged image',
+                submitter: 'admin',
+                submitterParameter: 'APPROVED_BY',
+                parameters: [string(name: 'CONFIRM_IMAGE_ID', defaultValue: imageId, description: 'Must exactly match the signed staged image ID.')]
+              )
+              if (!(approval instanceof Map) || approval.CONFIRM_IMAGE_ID != imageId) {
+                error('Production approval did not confirm the exact staged image ID.')
+              }
+              env.APPROVED_BY = approval.APPROVED_BY
+            }
+            }
+        }
+        stage('Promote Without Rebuild') {
+            steps {
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+    candidate_config=".candidate-production-compose-${BUILD_TAG}.yaml"
+    export IMAGE_REF="$(cat .catalog-image-id)"
+    bash ops/jenkins/compose.sh -f compose.production.yaml config > "${candidate_config}"
+touch ".catalog-promotion-${BUILD_TAG}"
+    bash ops/jenkins/compose.sh -f "${candidate_config}" up -d --no-build
+'''
+            }
+        }
+        stage('Production Smoke Check') {
+            steps {
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+for attempt in $(seq 1 12); do
+  health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)
+  [[ "${health}" == "healthy" ]] && break
+  [[ "${attempt}" == "12" ]] && exit 1
+  sleep 5
+done
+docker exec "${CONTAINER_NAME}" node -e "fetch('http://127.0.0.1:8080/health').then(r => { if (!r.ok) process.exit(1) })"
+[[ "$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}")" == "$(cat .catalog-image-id)" ]] || exit 1
+'''
+      }
+    }
+    stage('Record Production Evidence') {
+      steps {
+        withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
+          sh '''#!/usr/bin/env bash
+set -euo pipefail
+export IMAGE_ID="$(cat .catalog-image-id)"
+export STAGED_COMMIT="$(cat .catalog-staged-commit)"
+export STAGED_TREE="$(cat .catalog-staged-tree)"
+export STAGING_BUILD_URL="$(cat .catalog-staging-build-url)"
+python3 - <<'PY'
+import hashlib
+import hmac
+import json
+import os
+from datetime import datetime, timezone
+
+payload = {
+  "schema": "stillwaters.production-receipt.v1",
+  "service": "news-ledger",
+  "manifestDigest": "38a0394f29350efac872bf8868ea7c6bae5d8d3adf5af0cf1b601c16cabe49e8",
+  "stagedCommit": os.environ["STAGED_COMMIT"],
+  "stagedTree": os.environ["STAGED_TREE"],
+  "imageId": os.environ["IMAGE_ID"],
+  "stagingBuildUrl": os.environ["STAGING_BUILD_URL"],
+  "productionBuildUrl": os.environ["BUILD_URL"],
+  "approvedBy": os.environ["APPROVED_BY"],
+  "productionUrl": "https://news.stillwaters.cz",
+  "internalVerifiedAt": datetime.now(timezone.utc).isoformat(),
+}
+message = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+payload["signature"] = hmac.new(
+  os.environ["RECEIPT_HMAC_KEY"].encode(), message, hashlib.sha256
+).hexdigest()
+with open("production-receipt.json", "w", encoding="utf-8") as target:
+  json.dump(payload, target, sort_keys=True, separators=(",", ":"))
+  target.write("\n")
+PY
+cat production-receipt.json
+'''
+        }
+            }
+        }
+        stage('Archive Evidence And Commit Recovery Bundle') {
+            steps {
+                archiveArtifacts artifacts: 'production-receipt.json', fingerprint: true
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+candidate_config=".candidate-production-compose-${BUILD_TAG}.yaml"
+state_dir="${JENKINS_HOME}/catalog-deployments/news-ledger/production"
+temporary_config="${state_dir}/last-known-good.yaml.tmp-${BUILD_TAG}"
+cp "${candidate_config}" "${temporary_config}"
+chmod 600 "${temporary_config}"
+mv "${temporary_config}" "${state_dir}/last-known-good.yaml"
+'''
+            }
+        }
+    }
+    post {
+        failure {
+            sh '''#!/usr/bin/env bash
+set -euo pipefail
+marker=".catalog-promotion-${BUILD_TAG}"
+previous_image=".previous-production-image-${BUILD_TAG}"
+previous_config=".previous-production-compose-${BUILD_TAG}.yaml"
+candidate_config=".candidate-production-compose-${BUILD_TAG}.yaml"
+if [[ -f "${marker}" ]]; then
+  if [[ -s "${previous_image}" && -s "${previous_config}" ]]; then
+    bash ops/jenkins/compose.sh -f "${previous_config}" up -d --no-build
+    expected_image="$(cat "${previous_image}")"
+    for attempt in $(seq 1 12); do
+      restored_image="$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+      restored_health="$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+      [[ "${restored_image}" == "${expected_image}" && "${restored_health}" == "healthy" ]] && break
+      [[ "${attempt}" == "12" ]] && {
+        echo 'Production rollback did not restore the prior healthy deployment.' >&2
+        exit 1
+      }
+      sleep 5
+    done
+  else
+    if [[ -s "${candidate_config}" ]]; then
+      bash ops/jenkins/compose.sh -f "${candidate_config}" down --remove-orphans
+    else
+      docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+rm -f "${marker}" "${previous_image}" "${previous_config}" "${candidate_config}"
+'''
+        }
+        cleanup {
+            sh '''#!/usr/bin/env bash
+rm -f ".catalog-promotion-${BUILD_TAG}"   ".previous-production-image-${BUILD_TAG}"   ".previous-production-compose-${BUILD_TAG}.yaml"   ".candidate-production-compose-${BUILD_TAG}.yaml"
+'''
+        }
+    }
+}

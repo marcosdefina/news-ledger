@@ -1,0 +1,16 @@
+schema: stillwaters.github-repository.v1
+repository:
+  provider: github
+  owner: marcosdefina
+  name: news-ledger
+  visibility: private
+  branches:
+    development: develop
+    staging: staging
+    production: master
+requiredChecks: []
+requiredChecksStatus: pending-jenkins-commit-status-publisher
+requirePullRequest: true
+dismissStaleReviews: true
+blockForcePushes: true
+blockDeletions: true

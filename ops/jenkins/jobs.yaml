@@ -1,0 +1,15 @@
+schema: stillwaters.jenkins-jobs.v1
+service: news-ledger
+jobs:
+  - name: news-ledger-ci
+    branch: develop
+    scriptPath: Jenkinsfile.ci
+    trigger: github
+  - name: news-ledger-staging
+    branch: staging
+    scriptPath: Jenkinsfile.staging
+    trigger: github
+  - name: news-ledger-production
+    branch: master
+    scriptPath: Jenkinsfile.production
+    trigger: none

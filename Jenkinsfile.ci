@@ -1,0 +1,31 @@
+pipeline {
+    agent any
+    options {
+        ansiColor('xterm')
+        timestamps()
+      skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+    stages {
+        stage('Checkout Clean Candidate') {
+          steps {
+            deleteDir()
+            checkout scm
+            sh '''#!/usr/bin/env bash
+    set -euo pipefail
+    git reset --hard HEAD
+    git clean -ffdx
+    '''
+          }
+        }
+        stage('Test') {
+            steps {
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+docker build --target test -t news-ledger:ci-${BUILD_NUMBER} .
+'''
+            }
+        }
+    }
+}

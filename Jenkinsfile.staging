@@ -1,0 +1,152 @@
+pipeline {
+  agent { label 'mainframe' }
+    options {
+        ansiColor('xterm')
+        timestamps()
+      skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+    }
+    environment {
+        IMAGE_NAME = 'news-ledger'
+        CONTAINER_NAME = 'news-ledger-staging'
+      COLLECTOR_CONTAINER_NAME = 'news-ledger-collector'
+      PRODUCTION_DATA_VOLUME = 'news-ledger-production-data'
+      JENKINS_CONTROLLER_CONTAINER = 'jenkins'
+      COMPOSE_HELPER_IMAGE = 'docker:28.5.1-cli@sha256:a35dae37a79d2b84ccf0100045aec5ab920e4cc8e84f9141d355da602f8af899'
+    }
+    stages {
+      stage('Checkout Clean Candidate') {
+        steps {
+          deleteDir()
+          checkout scm
+          sh '''#!/usr/bin/env bash
+  set -euo pipefail
+  git reset --hard HEAD
+  git clean -ffdx
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
+    echo 'Staging build context is not pristine.' >&2
+    exit 1
+  }
+  '''
+        }
+      }
+        stage('Build Once And Test') {
+            steps {
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+docker build --target runtime \
+  --iidfile .catalog-image-id \
+  -t "${IMAGE_NAME}:candidate-${BUILD_NUMBER}" .
+'''
+            }
+        }
+        stage('Deploy Staging') {
+            steps {
+                sh '''#!/usr/bin/env bash
+set -euo pipefail
+IMAGE_REF="$(cat .catalog-image-id)"
+export IMAGE_REF
+docker volume create "${PRODUCTION_DATA_VOLUME}" >/dev/null
+docker run --rm --user root \
+  -v "${PRODUCTION_DATA_VOLUME}:/data" \
+  "${IMAGE_REF}" chown node:node /data
+docker run --rm \
+  -e LEDGER_DB_PATH=/data/news-ledger.db \
+  -v "${PRODUCTION_DATA_VOLUME}:/data:ro" \
+  "${IMAGE_REF}" node src/cli.mjs verify-bootstrap
+docker run --rm \
+  -e LEDGER_DB_PATH=/data/news-ledger.db \
+  -v "${PRODUCTION_DATA_VOLUME}:/data" \
+  "${IMAGE_REF}" node src/cli.mjs init
+docker run --rm \
+  -e LEDGER_DB_PATH=/data/news-ledger.db \
+  -v "${PRODUCTION_DATA_VOLUME}:/data" \
+  "${IMAGE_REF}" node src/cli.mjs collect
+docker run --rm \
+  -e LEDGER_DB_PATH=/data/news-ledger.db \
+  -v "${PRODUCTION_DATA_VOLUME}:/data:ro" \
+  "${IMAGE_REF}" node src/cli.mjs verify-bootstrap
+bash ops/jenkins/compose.sh -f compose.staging.yaml up -d --no-build
+'''
+            }
+        }
+        stage('Verify Staging') {
+            steps {
+            withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
+              sh '''#!/usr/bin/env bash
+set -euo pipefail
+for attempt in $(seq 1 12); do
+  health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${CONTAINER_NAME}" 2>/dev/null || true)
+  [[ "${health}" == "healthy" ]] && break
+  [[ "${attempt}" == "12" ]] && exit 1
+  sleep 5
+done
+docker exec "${CONTAINER_NAME}" node -e "fetch('http://127.0.0.1:8080/health').then(async r => { const body = await r.json(); if (!r.ok || body.dataSource !== 'production' || body.counts.sources !== 4 || body.counts.articles < 1) process.exit(1) })"
+IMAGE_ID="$(cat .catalog-image-id)"
+RUNNING_IMAGE_ID="$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}")"
+[[ "${RUNNING_IMAGE_ID}" == "${IMAGE_ID}" ]] || { echo 'Staging container is not running the built image.' >&2; exit 1; }
+[[ "$(docker inspect --format='{{.Image}}' "${COLLECTOR_CONTAINER_NAME}")" == "${IMAGE_ID}" ]] || {
+  echo 'Collector is not running the staged image.' >&2
+  exit 1
+}
+[[ "$(docker inspect --format='{{range .Mounts}}{{if eq .Destination \"/data\"}}{{.Name}}:{{.RW}}{{end}}{{end}}' "${CONTAINER_NAME}")" == "${PRODUCTION_DATA_VOLUME}:false" ]] || {
+  echo 'Staging web is not read-only on the production data volume.' >&2
+  exit 1
+}
+[[ "$(docker inspect --format='{{range .Mounts}}{{if eq .Destination \"/data\"}}{{.Name}}:{{.RW}}{{end}}{{end}}' "${COLLECTOR_CONTAINER_NAME}")" == "${PRODUCTION_DATA_VOLUME}:true" ]] || {
+  echo 'Collector is not the writable production data owner.' >&2
+  exit 1
+}
+curl --fail --silent --show-error --retry 5 --retry-delay 2 \
+  --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
+  "https://staging.news.stillwaters.cz/health" >/dev/null
+export STAGED_COMMIT="$(git rev-parse HEAD)"
+export STAGED_TREE="$(git rev-parse 'HEAD^{tree}')"
+[[ "$(git rev-parse "${STAGED_COMMIT}^{tree}")" == "${STAGED_TREE}" ]] || {
+  echo 'Staged commit does not own the signed tree.' >&2
+  exit 1
+}
+[[ "${GIT_COMMIT}" == "${STAGED_COMMIT}" ]] || {
+  echo 'Jenkins GIT_COMMIT does not match checked-out HEAD.' >&2
+  exit 1
+}
+export IMAGE_ID
+python3 - <<'PY'
+import hashlib
+import hmac
+import json
+import os
+from datetime import datetime, timezone
+
+payload = {
+    "schema": "stillwaters.staging-receipt.v2",
+    "service": "news-ledger",
+    "manifestDigest": "38a0394f29350efac872bf8868ea7c6bae5d8d3adf5af0cf1b601c16cabe49e8",
+    "branch": "staging",
+    "commit": os.environ["STAGED_COMMIT"],
+    "tree": os.environ["STAGED_TREE"],
+    "imageId": os.environ["IMAGE_ID"],
+    "buildUrl": os.environ["BUILD_URL"],
+    "stagingUrl": "https://staging.news.stillwaters.cz",
+    "healthPath": "/health",
+    "verifiedAt": datetime.now(timezone.utc).isoformat(),
+}
+message = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+payload["signature"] = hmac.new(
+    os.environ["RECEIPT_HMAC_KEY"].encode(), message, hashlib.sha256
+).hexdigest()
+with open("staging-receipt.json", "w", encoding="utf-8") as target:
+    json.dump(payload, target, sort_keys=True, separators=(",", ":"))
+    target.write("\n")
+PY
+cat staging-receipt.json
+'''
+                }
+            }
+        }
+    }
+    post {
+        success { archiveArtifacts artifacts: 'staging-receipt.json', fingerprint: true }
+    }
+}

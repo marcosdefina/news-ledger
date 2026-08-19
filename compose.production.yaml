@@ -1,0 +1,28 @@
+name: news-ledger-production
+
+services:
+  app:
+    image: ${IMAGE_REF:?IMAGE_REF must be the staged immutable image ID}
+    container_name: news-ledger-production
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DATA_SOURCE: production
+      LEDGER_DB_PATH: /data/news-ledger.db
+      LEDGER_READ_ONLY: "true"
+    ports:
+      - "${HOST_BIND_ADDRESS:-192.168.0.245}:18110:8080"
+    volumes:
+      - production-data:/data:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 5s
+
+volumes:
+  production-data:
+    external: true
+    name: ${NEWS_LEDGER_PRODUCTION_DATA_VOLUME:-news-ledger-production-data}

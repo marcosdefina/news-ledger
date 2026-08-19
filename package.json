@@ -1,0 +1,17 @@
+{
+  "name": "news-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "collect": "node src/cli.mjs collect",
+    "collect:loop": "node src/cli.mjs loop",
+    "db:init": "node src/cli.mjs init",
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.7.0",
+    "parse5": "^8.0.0"
+  }
+}

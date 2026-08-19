@@ -1,0 +1,17 @@
+schema: stillwaters.catalog-registration.v1
+service:
+  id: news-ledger
+  name: News Ledger
+  description: Provenance-first public record of news articles, revisions,
+    reception, and evidence-backed classifications.
+  directory: projects/news-ledger
+  icon: newspaper
+  runtimeHost: mainframe
+  healthPath: /health
+routes:
+  - environment: staging
+    hostname: staging.news.stillwaters.cz
+    backendPort: 18111
+  - environment: production
+    hostname: news.stillwaters.cz
+    backendPort: 18110

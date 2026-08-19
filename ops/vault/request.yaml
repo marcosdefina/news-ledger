@@ -1,0 +1,8 @@
+schema: stillwaters.vault-request.v1
+service: news-ledger
+collectionId: project-docs
+title: News Ledger
+sourceFiles:
+  - README.md
+  - SERVICE_CONTEXT.md
+mutationPolicy: vault-librarian-preview-exact-hash-approval-apply
