@@ -15,6 +15,13 @@ pipeline {
       JENKINS_CONTROLLER_CONTAINER = 'jenkins'
       COMPOSE_HELPER_IMAGE = 'docker:28.5.1-cli@sha256:a35dae37a79d2b84ccf0100045aec5ab920e4cc8e84f9141d355da602f8af899'
     }
+    parameters {
+      booleanParam(
+        name: 'REQUIRE_PUBLIC_ROUTE',
+        defaultValue: true,
+        description: 'Require the public staging route and create a signed staging receipt. Disable only for the first internal backend bootstrap.'
+      )
+    }
     stages {
       stage('Checkout Clean Candidate') {
         steps {
@@ -71,9 +78,8 @@ bash ops/jenkins/compose.sh -f compose.staging.yaml up -d --no-build
 '''
             }
         }
-        stage('Verify Staging') {
+        stage('Verify Internal Staging') {
             steps {
-            withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
               sh '''#!/usr/bin/env bash
 set -euo pipefail
 for attempt in $(seq 1 12); do
@@ -98,9 +104,21 @@ RUNNING_IMAGE_ID="$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}")"
   echo 'Collector is not the writable production data owner.' >&2
   exit 1
 }
+'''
+            }
+        }
+        stage('Verify Public Route And Sign Receipt') {
+          when {
+            expression { return params.REQUIRE_PUBLIC_ROUTE }
+          }
+          steps {
+            withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
+              sh '''#!/usr/bin/env bash
+set -euo pipefail
 curl --fail --silent --show-error --retry 5 --retry-delay 2 \
   --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
   "https://staging.news.stillwaters.cz/health" >/dev/null
+IMAGE_ID="$(cat .catalog-image-id)"
 export STAGED_COMMIT="$(git rev-parse HEAD)"
 export STAGED_TREE="$(git rev-parse 'HEAD^{tree}')"
 [[ "$(git rev-parse "${STAGED_COMMIT}^{tree}")" == "${STAGED_TREE}" ]] || {
@@ -147,6 +165,14 @@ cat staging-receipt.json
         }
     }
     post {
-        success { archiveArtifacts artifacts: 'staging-receipt.json', fingerprint: true }
+        success {
+          script {
+            if (params.REQUIRE_PUBLIC_ROUTE) {
+              archiveArtifacts artifacts: 'staging-receipt.json', fingerprint: true
+            } else {
+              echo 'Internal staging bootstrap completed without a signed public-route receipt.'
+            }
+          }
+        }
     }
 }
