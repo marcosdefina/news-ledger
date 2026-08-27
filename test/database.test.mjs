@@ -156,3 +156,59 @@ test("ledger stores immutable captures and creates only meaningful article versi
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("source statistics aggregate articles and captures without a cross product", () => {
+  const database = openLedger({ databasePath: ":memory:" });
+  try {
+    database.exec(`
+      WITH RECURSIVE sequence(value) AS (
+        SELECT 1
+        UNION ALL
+        SELECT value + 1 FROM sequence WHERE value < 1500
+      )
+      INSERT INTO articles(source_id, canonical_url, first_seen_at, last_seen_at)
+      SELECT
+        'guardian-uk',
+        'https://example.test/article/' || value,
+        '2026-08-27T00:00:00.000Z',
+        '2026-08-27T00:00:00.000Z'
+      FROM sequence;
+
+      WITH RECURSIVE sequence(value) AS (
+        SELECT 1
+        UNION ALL
+        SELECT value + 1 FROM sequence WHERE value < 1500
+      )
+      INSERT INTO feed_captures(
+        source_id, fetched_at, request_url, final_url, http_status,
+        response_headers_json, payload_bytes, stored_bytes, parse_status,
+        item_count, duration_ms, collector_version
+      )
+      SELECT
+        'guardian-uk',
+        printf('2026-08-27T00:%02d:00.000Z', value % 60),
+        'https://www.theguardian.com/uk/rss',
+        'https://www.theguardian.com/uk/rss',
+        304,
+        '{}',
+        0,
+        0,
+        'not-modified',
+        0,
+        1,
+        'test'
+      FROM sequence;
+    `);
+
+    const startedAt = performance.now();
+    const sources = listSourceStats(database);
+    const elapsedMs = performance.now() - startedAt;
+    const guardian = sources.find(({ id }) => id === "guardian-uk");
+
+    assert.equal(guardian.articleCount, 1500);
+    assert.equal(guardian.captureCount, 1500);
+    assert.ok(elapsedMs < 1000, `source statistics took ${elapsedMs.toFixed(1)} ms`);
+  } finally {
+    database.close();
+  }
+});
