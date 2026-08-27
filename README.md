@@ -90,3 +90,4 @@ Initial registration activates staging only. The production route stays absent
 until the exact staged image is explicitly approved after the staging report.
 
 See [SERVICE_CONTEXT.md](SERVICE_CONTEXT.md) for the agent and delivery contract.
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for verified incident signatures and recovery checks.
