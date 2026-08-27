@@ -569,18 +569,30 @@ export function listArticles(database, options = {}) {
 
 export function listSourceStats(database) {
   return database.prepare(`
+    WITH article_counts AS (
+      SELECT source_id, COUNT(*) AS article_count
+      FROM articles
+      GROUP BY source_id
+    ), capture_stats AS (
+      SELECT
+        source_id,
+        COUNT(*) AS capture_count,
+        MAX(fetched_at) AS last_capture_at,
+        MAX(CASE WHEN parse_status = 'parsed' THEN fetched_at END) AS last_success_at
+      FROM feed_captures
+      GROUP BY source_id
+    )
     SELECT
       s.id, s.name, s.country_code, s.country_name, s.kind, s.homepage_url,
       s.feed_url, s.terms_url, s.capture_policy, s.public_content_policy,
       s.notes, s.active,
-      COUNT(DISTINCT a.id) AS article_count,
-      COUNT(DISTINCT f.id) AS capture_count,
-      MAX(f.fetched_at) AS last_capture_at,
-      MAX(CASE WHEN f.parse_status = 'parsed' THEN f.fetched_at END) AS last_success_at
+      COALESCE(a.article_count, 0) AS article_count,
+      COALESCE(f.capture_count, 0) AS capture_count,
+      f.last_capture_at,
+      f.last_success_at
     FROM sources s
-    LEFT JOIN articles a ON a.source_id = s.id
-    LEFT JOIN feed_captures f ON f.source_id = s.id
-    GROUP BY s.id
+    LEFT JOIN article_counts a ON a.source_id = s.id
+    LEFT JOIN capture_stats f ON f.source_id = s.id
     ORDER BY s.country_code, s.name
   `).all().map((row) => ({
     id: row.id,
