@@ -191,6 +191,7 @@ export IMAGE_ID="$(cat .catalog-image-id)"
 export STAGED_COMMIT="$(cat .catalog-staged-commit)"
 export STAGED_TREE="$(cat .catalog-staged-tree)"
 export STAGING_BUILD_URL="$(cat .catalog-staging-build-url)"
+export PRODUCTION_BUILD_URL="https://jenkins.stillwaters.cz/job/news-ledger-production/${BUILD_NUMBER}/"
 python3 - <<'PY'
 import hashlib
 import hmac
@@ -206,7 +207,7 @@ payload = {
   "stagedTree": os.environ["STAGED_TREE"],
   "imageId": os.environ["IMAGE_ID"],
   "stagingBuildUrl": os.environ["STAGING_BUILD_URL"],
-  "productionBuildUrl": os.environ["BUILD_URL"],
+  "productionBuildUrl": os.environ["PRODUCTION_BUILD_URL"],
   "approvedBy": os.environ["APPROVED_BY"],
   "productionUrl": "https://news.stillwaters.cz",
   "internalVerifiedAt": datetime.now(timezone.utc).isoformat(),
