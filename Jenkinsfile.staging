@@ -145,6 +145,7 @@ REMOTE_STAGING_COMMIT="$(git rev-parse 'origin/staging^{commit}')"
   exit 1
 }
 export IMAGE_ID
+export STAGING_BUILD_URL="https://jenkins.stillwaters.cz/job/news-ledger-staging/${BUILD_NUMBER}/"
 python3 - <<'PY'
 import hashlib
 import hmac
@@ -160,7 +161,7 @@ payload = {
     "commit": os.environ["STAGED_COMMIT"],
     "tree": os.environ["STAGED_TREE"],
     "imageId": os.environ["IMAGE_ID"],
-    "buildUrl": os.environ["BUILD_URL"],
+    "buildUrl": os.environ["STAGING_BUILD_URL"],
     "stagingUrl": "https://staging.news.stillwaters.cz",
     "healthPath": "/health",
     "verifiedAt": datetime.now(timezone.utc).isoformat(),
