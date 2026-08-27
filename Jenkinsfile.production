@@ -111,7 +111,7 @@ for filename, field in (
     (".catalog-staging-build-url", "buildUrl"),
 ):
     with open(filename, "w", encoding="utf-8") as target:
-        target.write(receipt[field] + "\n")
+        target.write(receipt[field] + "\\n")
 PY
 IMAGE_ID="$(cat .catalog-image-id)"
 STAGED_COMMIT="$(cat .catalog-staged-commit)"
@@ -217,7 +217,7 @@ payload["signature"] = hmac.new(
 ).hexdigest()
 with open("production-receipt.json", "w", encoding="utf-8") as target:
   json.dump(payload, target, sort_keys=True, separators=(",", ":"))
-  target.write("\n")
+  target.write("\\n")
 PY
 cat production-receipt.json
 '''
