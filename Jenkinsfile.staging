@@ -128,9 +128,10 @@ set -euo pipefail
 curl --fail --silent --show-error --retry 5 --retry-delay 2 \
   --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
   "https://staging.news.stillwaters.cz/health" >/dev/null
-curl --fail --silent --show-error --max-time 15 \
+STAGING_HOMEPAGE="$(curl --fail --silent --show-error --max-time 15 \
   --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
-  "https://staging.news.stillwaters.cz/" | grep -qF 'A record of what was published'
+  "https://staging.news.stillwaters.cz/")"
+grep -qF 'A record of what was published' <<< "${STAGING_HOMEPAGE}"
 IMAGE_ID="$(cat .catalog-image-id)"
 export STAGED_COMMIT="$(git rev-parse HEAD)"
 export STAGED_TREE="$(git rev-parse 'HEAD^{tree}')"
