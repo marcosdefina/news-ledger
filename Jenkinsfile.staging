@@ -171,7 +171,7 @@ payload["signature"] = hmac.new(
 ).hexdigest()
 with open("staging-receipt.json", "w", encoding="utf-8") as target:
     json.dump(payload, target, sort_keys=True, separators=(",", ":"))
-    target.write("\n")
+    target.write("\\n")
 PY
 cat staging-receipt.json
 '''
