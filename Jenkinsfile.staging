@@ -134,8 +134,9 @@ export STAGED_TREE="$(git rev-parse 'HEAD^{tree}')"
   echo 'Staged commit does not own the signed tree.' >&2
   exit 1
 }
-[[ "${GIT_COMMIT}" == "${STAGED_COMMIT}" ]] || {
-  echo 'Jenkins GIT_COMMIT does not match checked-out HEAD.' >&2
+REMOTE_STAGING_COMMIT="$(git rev-parse 'origin/staging^{commit}')"
+[[ "${REMOTE_STAGING_COMMIT}" == "${STAGED_COMMIT}" ]] || {
+  echo 'Checked-out HEAD does not match origin/staging.' >&2
   exit 1
 }
 export IMAGE_ID
