@@ -100,7 +100,7 @@ if not re.fullmatch(r"[a-f0-9]{40,64}", receipt.get("tree", "")):
 if not re.fullmatch(r"sha256:[a-f0-9]{64}", receipt.get("imageId", "")):
     raise SystemExit("staging receipt image ID is invalid")
 if not re.fullmatch(
-    r"https://jenkins\.stillwaters\.cz/job/news-ledger-staging/[0-9]+/",
+  r"https://jenkins[.]stillwaters[.]cz/job/news-ledger-staging/[0-9]+/",
     receipt.get("buildUrl", ""),
 ):
     raise SystemExit("staging receipt build URL is invalid")
