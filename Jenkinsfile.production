@@ -111,7 +111,7 @@ for filename, field in (
     (".catalog-staging-build-url", "buildUrl"),
 ):
     with open(filename, "w", encoding="utf-8") as target:
-        target.write(receipt[field] + "\n")
+        target.write(receipt[field] + "\\n")
 PY
 IMAGE_ID="$(cat .catalog-image-id)"
 STAGED_COMMIT="$(cat .catalog-staged-commit)"
@@ -191,6 +191,7 @@ export IMAGE_ID="$(cat .catalog-image-id)"
 export STAGED_COMMIT="$(cat .catalog-staged-commit)"
 export STAGED_TREE="$(cat .catalog-staged-tree)"
 export STAGING_BUILD_URL="$(cat .catalog-staging-build-url)"
+export PRODUCTION_BUILD_URL="https://jenkins.stillwaters.cz/job/news-ledger-production/${BUILD_NUMBER}/"
 python3 - <<'PY'
 import hashlib
 import hmac
@@ -206,7 +207,7 @@ payload = {
   "stagedTree": os.environ["STAGED_TREE"],
   "imageId": os.environ["IMAGE_ID"],
   "stagingBuildUrl": os.environ["STAGING_BUILD_URL"],
-  "productionBuildUrl": os.environ["BUILD_URL"],
+  "productionBuildUrl": os.environ["PRODUCTION_BUILD_URL"],
   "approvedBy": os.environ["APPROVED_BY"],
   "productionUrl": "https://news.stillwaters.cz",
   "internalVerifiedAt": datetime.now(timezone.utc).isoformat(),
@@ -217,7 +218,7 @@ payload["signature"] = hmac.new(
 ).hexdigest()
 with open("production-receipt.json", "w", encoding="utf-8") as target:
   json.dump(payload, target, sort_keys=True, separators=(",", ":"))
-  target.write("\n")
+  target.write("\\n")
 PY
 cat production-receipt.json
 '''

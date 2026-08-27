@@ -15,6 +15,13 @@ pipeline {
       JENKINS_CONTROLLER_CONTAINER = 'jenkins'
       COMPOSE_HELPER_IMAGE = 'docker:28.5.1-cli@sha256:a35dae37a79d2b84ccf0100045aec5ab920e4cc8e84f9141d355da602f8af899'
     }
+    parameters {
+      booleanParam(
+        name: 'REQUIRE_PUBLIC_ROUTE',
+        defaultValue: true,
+        description: 'Require the public staging route and create a signed staging receipt. Disable only for the first internal backend bootstrap.'
+      )
+    }
     stages {
       stage('Checkout Clean Candidate') {
         steps {
@@ -71,9 +78,8 @@ bash ops/jenkins/compose.sh -f compose.staging.yaml up -d --no-build
 '''
             }
         }
-        stage('Verify Staging') {
+        stage('Verify Internal Staging') {
             steps {
-            withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
               sh '''#!/usr/bin/env bash
 set -euo pipefail
 for attempt in $(seq 1 12); do
@@ -82,7 +88,17 @@ for attempt in $(seq 1 12); do
   [[ "${attempt}" == "12" ]] && exit 1
   sleep 5
 done
+for attempt in $(seq 1 12); do
+  collector_health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "${COLLECTOR_CONTAINER_NAME}" 2>/dev/null || true)
+  [[ "${collector_health}" == "healthy" ]] && break
+  [[ "${attempt}" == "12" ]] && {
+    docker logs --tail 100 "${COLLECTOR_CONTAINER_NAME}" || true
+    exit 1
+  }
+  sleep 5
+done
 docker exec "${CONTAINER_NAME}" node -e "fetch('http://127.0.0.1:8080/health').then(async r => { const body = await r.json(); if (!r.ok || body.dataSource !== 'production' || body.counts.sources !== 4 || body.counts.articles < 1) process.exit(1) })"
+docker exec "${CONTAINER_NAME}" node -e "fetch('http://127.0.0.1:8080/', { signal: AbortSignal.timeout(10000) }).then(async r => { const body = await r.text(); if (!r.ok || !body.includes('A record of what was published')) process.exit(1) })"
 IMAGE_ID="$(cat .catalog-image-id)"
 RUNNING_IMAGE_ID="$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}")"
 [[ "${RUNNING_IMAGE_ID}" == "${IMAGE_ID}" ]] || { echo 'Staging container is not running the built image.' >&2; exit 1; }
@@ -98,20 +114,38 @@ RUNNING_IMAGE_ID="$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}")"
   echo 'Collector is not the writable production data owner.' >&2
   exit 1
 }
+'''
+            }
+        }
+        stage('Verify Public Route And Sign Receipt') {
+          when {
+            expression { return params.REQUIRE_PUBLIC_ROUTE }
+          }
+          steps {
+            withCredentials([string(credentialsId: 'catalog-receipt-hmac', variable: 'RECEIPT_HMAC_KEY')]) {
+              sh '''#!/usr/bin/env bash
+set -euo pipefail
 curl --fail --silent --show-error --retry 5 --retry-delay 2 \
   --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
   "https://staging.news.stillwaters.cz/health" >/dev/null
+STAGING_HOMEPAGE="$(curl --fail --silent --show-error --max-time 15 \
+  --resolve "staging.news.stillwaters.cz:443:192.168.0.63" \
+  "https://staging.news.stillwaters.cz/")"
+grep -qF 'A record of what was published' <<< "${STAGING_HOMEPAGE}"
+IMAGE_ID="$(cat .catalog-image-id)"
 export STAGED_COMMIT="$(git rev-parse HEAD)"
 export STAGED_TREE="$(git rev-parse 'HEAD^{tree}')"
 [[ "$(git rev-parse "${STAGED_COMMIT}^{tree}")" == "${STAGED_TREE}" ]] || {
   echo 'Staged commit does not own the signed tree.' >&2
   exit 1
 }
-[[ "${GIT_COMMIT}" == "${STAGED_COMMIT}" ]] || {
-  echo 'Jenkins GIT_COMMIT does not match checked-out HEAD.' >&2
+REMOTE_STAGING_COMMIT="$(git rev-parse 'origin/staging^{commit}')"
+[[ "${REMOTE_STAGING_COMMIT}" == "${STAGED_COMMIT}" ]] || {
+  echo 'Checked-out HEAD does not match origin/staging.' >&2
   exit 1
 }
 export IMAGE_ID
+export STAGING_BUILD_URL="https://jenkins.stillwaters.cz/job/news-ledger-staging/${BUILD_NUMBER}/"
 python3 - <<'PY'
 import hashlib
 import hmac
@@ -127,7 +161,7 @@ payload = {
     "commit": os.environ["STAGED_COMMIT"],
     "tree": os.environ["STAGED_TREE"],
     "imageId": os.environ["IMAGE_ID"],
-    "buildUrl": os.environ["BUILD_URL"],
+    "buildUrl": os.environ["STAGING_BUILD_URL"],
     "stagingUrl": "https://staging.news.stillwaters.cz",
     "healthPath": "/health",
     "verifiedAt": datetime.now(timezone.utc).isoformat(),
@@ -138,7 +172,7 @@ payload["signature"] = hmac.new(
 ).hexdigest()
 with open("staging-receipt.json", "w", encoding="utf-8") as target:
     json.dump(payload, target, sort_keys=True, separators=(",", ":"))
-    target.write("\n")
+    target.write("\\n")
 PY
 cat staging-receipt.json
 '''
@@ -147,6 +181,14 @@ cat staging-receipt.json
         }
     }
     post {
-        success { archiveArtifacts artifacts: 'staging-receipt.json', fingerprint: true }
+        success {
+          script {
+            if (params.REQUIRE_PUBLIC_ROUTE) {
+              archiveArtifacts artifacts: 'staging-receipt.json', fingerprint: true
+            } else {
+              echo 'Internal staging bootstrap completed without a signed public-route receipt.'
+            }
+          }
+        }
     }
 }

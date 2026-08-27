@@ -5,6 +5,7 @@ services:
     image: ${IMAGE_REF:?IMAGE_REF must be the staged immutable image ID}
     container_name: news-ledger-production
     restart: unless-stopped
+    network_mode: bridge
     environment:
       NODE_ENV: production
       PORT: "8080"
